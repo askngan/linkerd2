@@ -161,3 +161,61 @@ pub struct HttpRouteStatus {
     #[serde(flatten)]
     pub inner: RouteStatus,
 }
+
+pub fn parent_ref_targets_server(p: &ParentReference) -> bool {
+    match (p.group.as_deref(), p.kind.as_deref()) {
+        (Some(group), Some(kind)) => {
+            group.eq_ignore_ascii_case("policy.linkerd.io") && kind.eq_ignore_ascii_case("server")
+        }
+        _ => false,
+    }
+}
+
+impl HttpRouteFilter {
+    pub fn has_relative_paths(&self) -> bool {
+        if let HttpRouteFilter::RequestRedirect {
+            request_redirect:
+                HttpRequestRedirectFilter {
+                    path: Some(ref path),
+                    ..
+                },
+        } = self
+        {
+            match path {
+                HttpPathModifier::ReplaceFullPath(ref path) => !path.starts_with('/'),
+                HttpPathModifier::ReplacePrefixMatch(ref path) => !path.starts_with('/'),
+            }
+        } else {
+            false
+        }
+    }
+}
+
+impl HttpRouteRule {
+    pub fn has_relative_paths(&self) -> bool {
+        self.matches
+            .iter()
+            .flatten()
+            .any(route_match_has_relative_paths)
+            || self
+                .filters
+                .iter()
+                .flatten()
+                .any(HttpRouteFilter::has_relative_paths)
+    }
+}
+
+pub fn route_match_has_relative_paths(m: &HttpRouteMatch) -> bool {
+    m.path
+        .as_ref()
+        .map(path_match_has_relative_paths)
+        .unwrap_or(false)
+}
+
+pub fn path_match_has_relative_paths(m: &HttpPathMatch) -> bool {
+    match m {
+        HttpPathMatch::Exact { ref value } => !value.starts_with('/'),
+        HttpPathMatch::PathPrefix { ref value } => !value.starts_with('/'),
+        _ => false,
+    }
+}

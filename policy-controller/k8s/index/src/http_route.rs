@@ -1,5 +1,5 @@
 use ahash::AHashMap as HashMap;
-use anyhow::{Error, Result};
+use anyhow::{ensure, Error, Result};
 use linkerd_policy_controller_core::http_route;
 use linkerd_policy_controller_k8s_api::policy::httproute as api;
 use std::num::NonZeroU16;
@@ -94,13 +94,20 @@ impl InboundRouteBinding {
         }: api::HttpRouteMatch,
     ) -> Result<http_route::HttpRouteMatch> {
         let path = path
-            .map(|pm| match pm {
-                api::HttpPathMatch::Exact { value } => Ok(http_route::PathMatch::Exact(value)),
-                api::HttpPathMatch::PathPrefix { value } => {
-                    Ok(http_route::PathMatch::Prefix(value))
-                }
-                api::HttpPathMatch::RegularExpression { value } => {
-                    value.parse().map(http_route::PathMatch::Regex)
+            .map(|pm| {
+                ensure!(
+                    !api::path_match_has_relative_paths(&pm),
+                    "HttpPathMatch paths must be absolute (begin with `/`)"
+                );
+                match pm {
+                    api::HttpPathMatch::Exact { value } => Ok(http_route::PathMatch::Exact(value)),
+                    api::HttpPathMatch::PathPrefix { value } => {
+                        Ok(http_route::PathMatch::Prefix(value))
+                    }
+                    api::HttpPathMatch::RegularExpression { value } => value
+                        .parse()
+                        .map(http_route::PathMatch::Regex)
+                        .map_err(Into::into),
                 }
             })
             .transpose()?;
@@ -164,6 +171,10 @@ impl InboundRouteBinding {
     }
 
     fn try_filter(filter: api::HttpRouteFilter) -> Result<http_route::InboundFilter> {
+        ensure!(
+            !filter.has_relative_paths(),
+            "HttpRouteFilters may only contain absolute paths (beginning with '/')"
+        );
         let filter = match filter {
             api::HttpRouteFilter::RequestHeaderModifier {
                 request_header_modifier,
@@ -184,26 +195,21 @@ impl InboundRouteBinding {
 impl InboundParentRef {
     fn from_parent_ref(
         route_ns: Option<&str>,
-        api::ParentReference {
-            group,
-            kind,
+        parent_ref: api::ParentReference,
+    ) -> Result<Self, InvalidParentRef> {
+        // A policy.linkerd.io HTTPRoute's parent ref must select a Server resource.
+        if !api::parent_ref_targets_server(&parent_ref) {
+            return Err(InvalidParentRef::DoesNotSelectServer);
+        }
+
+        let api::ParentReference {
+            group: _,
+            kind: _,
             namespace,
             name,
             section_name,
             port,
-        }: api::ParentReference,
-    ) -> Result<Self, InvalidParentRef> {
-        // A policy.linkerd.io HTTPRoute's parent ref must select a Server resource.
-        if let Some(g) = group {
-            if let Some(k) = kind {
-                if !g.eq_ignore_ascii_case("policy.linkerd.io")
-                    || !k.eq_ignore_ascii_case("server")
-                    || name.is_empty()
-                {
-                    return Err(InvalidParentRef::DoesNotSelectServer);
-                }
-            }
-        }
+        } = parent_ref;
 
         if namespace.is_some() && namespace.as_deref() != route_ns {
             return Err(InvalidParentRef::ServerInAnotherNamespace);
